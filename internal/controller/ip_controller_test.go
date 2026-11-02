@@ -18,8 +18,12 @@ package controller
 
 import (
 	"context"
+	"net"
 	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/fluxcd/pkg/runtime/conditions"
 	. "github.com/onsi/gomega"
@@ -212,4 +216,42 @@ func TestIPReconciler_reconcileIP(t *testing.T) {
 			*conditions.FalseCondition(cloudflareoperatoriov1.ConditionTypeReady, cloudflareoperatoriov1.ConditionReasonFailed, "IP address \"invalid\" is not valid"),
 		}))
 	})
+}
+
+func TestIPReconciler_getIPSourceClosesConnections(t *testing.T) {
+	g := NewWithT(t)
+
+	var mu sync.Mutex
+	open := map[net.Conn]struct{}{}
+
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("1.1.1.1"))
+	}))
+	server.Config.ConnState = func(conn net.Conn, state http.ConnState) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch state {
+		case http.StateNew:
+			open[conn] = struct{}{}
+		case http.StateClosed, http.StateHijacked:
+			delete(open, conn)
+		}
+	}
+	server.Start()
+	defer server.Close()
+
+	r := &IPReconciler{HTTPClientTimeout: 5 * time.Second}
+	source := cloudflareoperatoriov1.IPSpecIPSources{URL: server.URL}
+
+	for range 20 {
+		address, err := r.getIPSource(context.TODO(), source)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(address).To(Equal("1.1.1.1"))
+	}
+
+	g.Eventually(func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(open)
+	}, 2*time.Second, 50*time.Millisecond).Should(BeZero())
 }

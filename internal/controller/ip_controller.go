@@ -185,9 +185,12 @@ func (r *IPReconciler) getIPSource(ctx context.Context, source cloudflareoperato
 		return "", fmt.Errorf("failed to parse URL %s: %s", source.URL, err)
 	}
 
+	// The transport is built per call and never reused, so a pooled keep-alive
+	// connection would stay open forever and exhaust local ports over time.
 	tr := http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: source.InsecureSkipVerify},
-		Proxy:           http.ProxyFromEnvironment,
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: source.InsecureSkipVerify},
+		Proxy:             http.ProxyFromEnvironment,
+		DisableKeepAlives: true,
 	}
 	httpClient := &http.Client{Transport: &tr}
 	req, err := http.NewRequest(source.RequestMethod, source.URL, io.Reader(bytes.NewBuffer([]byte(source.RequestBody))))
